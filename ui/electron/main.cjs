@@ -6,11 +6,14 @@ const path = require("node:path");
 // Official Anthropic SDK that wraps the user's installed `claude` binary
 // and handles subscription auth (Pro/Max OAuth) correctly. Loaded
 // lazily so the renderer doesn't pay the import cost on startup.
+// SDK ships as ESM (sdk.mjs), so we can't `require()` it from this CJS
+// file — Node mandates dynamic `import()`.
 let _claudeQuery = null;
-function loadClaudeSdk() {
+async function loadClaudeSdk() {
   if (_claudeQuery) return _claudeQuery;
   try {
-    _claudeQuery = require("@anthropic-ai/claude-agent-sdk").query;
+    const sdk = await import("@anthropic-ai/claude-agent-sdk");
+    _claudeQuery = sdk.query;
   } catch (e) {
     _claudeQuery = null;
     throw new Error(`@anthropic-ai/claude-agent-sdk not installed: ${e.message}`);
@@ -686,7 +689,7 @@ ipcMain.handle("ember:ai:chat", async (e, { messages, model, temperature }) => {
   // uses; nothing token-scraping or ToS-grey here.
   if (cfg.provider === "claude-cli") {
     let queryFn;
-    try { queryFn = loadClaudeSdk(); }
+    try { queryFn = await loadClaudeSdk(); }
     catch (e) { throw new Error(e.message); }
 
     const systemPrompt = extractSystemPrompt(messages);
