@@ -1,4 +1,5 @@
-# Ember
+# Ember (Made by Claude Opus 4.7 1M Context epstein edition.)
+#~ slaved by selena
 
 A from-scratch reverse-engineering toolkit: ELF + Mach-O loader, x86-64
 disassembler, IR lifter, SSA, cleanup passes, control-flow structuring,
