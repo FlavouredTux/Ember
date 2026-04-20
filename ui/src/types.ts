@@ -56,10 +56,11 @@ export type Arities = Record<number, number>;
 export type AiMessage  = { role: "system" | "user" | "assistant"; content: string };
 export type AiProvider = "openrouter" | "claude-cli" | "codex-cli";
 export type AiConfig   = {
-  provider:  AiProvider;
-  model:     string;
-  hasKey:    boolean;     // only meaningful for openrouter
-  encrypted: boolean;
+  provider:       AiProvider;
+  model:          string;
+  hasKey:         boolean;     // only meaningful for openrouter
+  encrypted:      boolean;
+  hasClaudeToken: boolean;     // claude-cli setup-token env, if stored
 };
 export type AiCliStatus = {
   installed: boolean;
@@ -88,7 +89,12 @@ declare global {
 
       ai: {
         getConfig:    () => Promise<AiConfig>;
-        setConfig:    (c: { apiKey?: string; model?: string; provider?: AiProvider }) => Promise<AiConfig>;
+        setConfig:    (c: {
+          apiKey?:      string;
+          claudeToken?: string;
+          model?:       string;
+          provider?:    AiProvider;
+        }) => Promise<AiConfig>;
         listModels:   (provider?: AiProvider) => Promise<string[]>;
         detectCli:    (kind: "claude-cli" | "codex-cli") => Promise<AiCliStatus>;
         chat:         (req: AiChatRequest) => Promise<string>;

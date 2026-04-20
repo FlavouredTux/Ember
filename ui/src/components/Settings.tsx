@@ -370,13 +370,16 @@ function AiConfigSection() {
       )}
 
       {cfg.provider === "claude-cli" && (
-        <CliStatusSection
-          kind="claude-cli"
-          status={claude}
-          onRefresh={reloadProbes}
-          loginCmd="claude auth login"
-          note="Uses Claude Code's logged-in subscription (Pro / Max / Team) or Anthropic Console API billing — whichever `claude auth login` was run with. Ember spawns the installed `claude` binary per request; no OAuth tokens cross into Ember."
-        />
+        <>
+          <CliStatusSection
+            kind="claude-cli"
+            status={claude}
+            onRefresh={reloadProbes}
+            loginCmd="claude auth login"
+            note="Ember spawns the installed `claude` binary per request. For Pro / Max subscriptions, `claude -p` (headless mode) needs the long-lived token below — the interactive `auth login` session doesn't carry over. Anthropic Console API billing works without a token."
+          />
+          <ClaudeTokenSection cfg={cfg} onSaved={(c) => setCfg(c)} />
+        </>
       )}
 
       {cfg.provider === "codex-cli" && (
@@ -458,6 +461,65 @@ function OpenRouterKeySection(props: {
           >forget key</button>
         </Row>
       )}
+    </>
+  );
+}
+
+// Claude Code long-lived OAuth token, for Pro / Max users whose `-p`
+// headless calls can't use the interactive auth session. The token
+// comes from `claude setup-token`; the CLI prints it to stdout and
+// tells the user to set CLAUDE_CODE_OAUTH_TOKEN. Ember stores it in
+// safeStorage and injects it into every claude spawn's env.
+function ClaudeTokenSection(props: {
+  cfg: AiConfig;
+  onSaved: (c: AiConfig) => void;
+}) {
+  const [draft, setDraft]   = useState("");
+  const [revealed, setRev]  = useState(false);
+  const [saving, setSaving] = useState(false);
+  return (
+    <>
+      <Row
+        label="Claude OAuth token"
+        hint={props.cfg.hasClaudeToken
+          ? "Stored (encrypted where the OS keychain is available). Paste a new token to replace; leave blank and hit save to forget."
+          : "Run `claude setup-token` in a terminal, copy the sk-ant-oat01-… string it prints, paste here."}
+      >
+        <div style={{ display: "flex", gap: 4 }}>
+          <input
+            type={revealed ? "text" : "password"}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={props.cfg.hasClaudeToken ? "•••••• (token set)" : "sk-ant-oat01-…"}
+            style={{
+              width: 220,
+              fontFamily: mono, fontSize: 11,
+              color: C.text, background: C.bg,
+              border: `1px solid ${C.border}`, borderRadius: 4,
+              padding: "5px 8px",
+            }}
+          />
+          <button onClick={() => setRev((r) => !r)} style={iconBtnStyle}>
+            {revealed ? "hide" : "show"}
+          </button>
+          <button
+            onClick={async () => {
+              setSaving(true);
+              try {
+                const next = await window.ember.ai.setConfig({ claudeToken: draft });
+                props.onSaved(next);
+                setDraft("");
+              } finally { setSaving(false); }
+            }}
+            disabled={saving}
+            style={{
+              ...iconBtnStyle,
+              background: draft ? C.accent : C.bgMuted,
+              color:      draft ? "#fff"   : C.textMuted,
+            }}
+          >save</button>
+        </div>
+      </Row>
     </>
   );
 }
