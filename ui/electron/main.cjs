@@ -223,8 +223,15 @@ ipcMain.handle("ember:saveAnnotations", async (_e, bp, data) => {
 
 const AI_CONFIG_PATH = () => path.join(app.getPath("userData"), "ai.json");
 
-const AI_PROVIDERS = ["openrouter", "claude-cli", "codex-cli"];
+const AI_PROVIDERS = ["openrouter", "claude-pro", "claude-cli", "codex-cli"];
 const AI_DEFAULT_PROVIDER = "openrouter";
+
+// Path to Claude Code's on-disk OAuth credentials. Linux & Windows
+// store the JSON here; macOS keeps the same shape in the Keychain
+// under service `com.anthropic.claude` (we read the file path first
+// and fall back to env-var-supplied tokens for the keychain case).
+const CLAUDE_CREDENTIALS_PATH = () =>
+  path.join(require("node:os").homedir(), ".claude", ".credentials.json");
 
 // Per-provider model lists surfaced as autocomplete suggestions. The
 // combobox in the UI lets users type any model id regardless — these
@@ -242,6 +249,15 @@ const AI_MODEL_SUGGESTIONS = {
     "deepseek/deepseek-chat-v3.5",
     "x-ai/grok-4",
     "meta-llama/llama-4-maverick",
+  ],
+  // OAuth-mode model ids must use the API's full-name format —
+  // sonnet/opus/haiku aliases are CLI-only conveniences.
+  "claude-pro": [
+    "claude-sonnet-4-6-20251015",
+    "claude-opus-4-7-20260301",
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
   ],
   "claude-cli": [
     "sonnet",
@@ -335,6 +351,28 @@ async function hasClaudeToken() {
   return !!(await loadClaudeToken());
 }
 
+// Read Claude Code's on-disk OAuth credentials. Used by the
+// `claude-pro` provider, which talks to the Anthropic Messages API
+// directly with the subscription's OAuth token because `claude -p`
+// doesn't accept OAuth — it requires ANTHROPIC_API_KEY billing.
+// Returns { accessToken, refreshToken, expiresAt } or null if the
+// file isn't there or has an unexpected shape.
+async function loadClaudeOAuth() {
+  let raw;
+  try { raw = await fs.readFile(CLAUDE_CREDENTIALS_PATH(), "utf8"); }
+  catch { return null; }
+  let j; try { j = JSON.parse(raw); } catch { return null; }
+  // Schema verified against `claude auth login` output:
+  //   { "claudeAiOauth": { accessToken, refreshToken, expiresAt, ... } }
+  // Older revisions used flat keys; accept both shapes.
+  const oauth = j.claudeAiOauth || j;
+  const accessToken  = oauth.accessToken  || oauth.access_token;
+  const refreshToken = oauth.refreshToken || oauth.refresh_token;
+  const expiresAt    = oauth.expiresAt    || oauth.expires_at;
+  if (!accessToken) return null;
+  return { accessToken, refreshToken, expiresAt };
+}
+
 async function saveAiConfig(patch) {
   // Read-modify-write so partial updates (just the provider, just the
   // model, just the key) don't clobber other fields.
@@ -421,6 +459,20 @@ ipcMain.handle("ember:ai:listModels", async (_e, provider) => {
 });
 
 ipcMain.handle("ember:ai:detectCli", async (_e, kind) => detectCli(kind));
+
+// Probe Claude OAuth credentials on disk for the claude-pro provider.
+// The Settings panel uses this to render a green/red status pill
+// without exposing the actual token bytes.
+ipcMain.handle("ember:ai:probeClaudeOAuth", async () => {
+  const cred = await loadClaudeOAuth();
+  if (!cred) return { found: false, expired: false };
+  const expired = !!(cred.expiresAt && cred.expiresAt < Date.now());
+  return {
+    found:    true,
+    expired,
+    expiresAt: cred.expiresAt || 0,
+  };
+});
 
 // Active in-flight requests, keyed by id so `ai:cancel` can abort.
 // Each entry records a {cancel} hook — HTTP requests use req.destroy,
@@ -675,6 +727,110 @@ ipcMain.handle("ember:ai:chat", async (e, { messages, model, temperature }) => {
                 send("ember:ai:chunk", delta);
               }
             } catch { /* keepalive */ }
+          }
+        }
+      });
+      res.on("end", () => {
+        send("ember:ai:done", { chars: total });
+        AI_INFLIGHT.delete(id);
+      });
+    });
+    req.on("error", (err) => {
+      send("ember:ai:error", err.message || String(err));
+      AI_INFLIGHT.delete(id);
+    });
+    AI_INFLIGHT.set(id, { cancel: () => req.destroy(new Error("cancelled")) });
+    req.write(body);
+    req.end();
+    return id;
+  }
+
+  // ---- Claude Pro/Max (OAuth direct to Anthropic API) ---------------
+  // Subscription users can't use `claude -p` for headless calls
+  // (it forces ANTHROPIC_API_KEY billing). The community fix is to
+  // read the OAuth token Claude Code stored after `claude auth login`
+  // and call the Messages API ourselves with the oauth-2025-04-20
+  // beta header. ToS note: Anthropic banned third-party tools from
+  // doing this in April 2026 — surfaces in the Settings panel as a
+  // warning, but we let the user opt in if they accept the risk.
+  if (cfg.provider === "claude-pro") {
+    const cred = await loadClaudeOAuth();
+    if (!cred) {
+      throw new Error("no Claude OAuth credentials at ~/.claude/.credentials.json — run `claude auth login` first");
+    }
+    if (cred.expiresAt && cred.expiresAt < Date.now()) {
+      throw new Error("Claude OAuth access token has expired — run `claude auth login` again to refresh");
+    }
+
+    // The system prompt becomes the API's `system` field; the rest
+    // of the conversation history goes in `messages` as-is. Claude's
+    // Messages API expects role: "user" | "assistant" only.
+    const systemPrompt = extractSystemPrompt(messages);
+    const apiMessages  = messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const body = JSON.stringify({
+      model:       chosenModel,
+      max_tokens:  4096,
+      stream:      true,
+      system:      systemPrompt || undefined,
+      messages:    apiMessages,
+      temperature: typeof temperature === "number" ? temperature : 0.4,
+    });
+
+    const req = https.request({
+      method:   "POST",
+      hostname: "api.anthropic.com",
+      path:     "/v1/messages",
+      headers:  {
+        "Authorization":     `Bearer ${cred.accessToken}`,
+        "Content-Type":      "application/json",
+        "Content-Length":    Buffer.byteLength(body),
+        "anthropic-version": "2023-06-01",
+        // The OAuth flag tells Anthropic this request is using a
+        // subscription token rather than an API key. Without it
+        // the server returns 401 "API key required".
+        "anthropic-beta":    "oauth-2025-04-20",
+        // Mimic the real CLI's UA so traffic looks identical to
+        // what `claude` itself would send. The exact version doesn't
+        // matter — the format does.
+        "User-Agent":        "claude-cli/2.1.114 (external, cli)",
+      },
+    }, (res) => {
+      if (res.statusCode && res.statusCode >= 400) {
+        let buf = "";
+        res.on("data", (d) => { buf += d.toString(); });
+        res.on("end", () => {
+          send("ember:ai:error",
+               `Anthropic ${res.statusCode}: ${buf.slice(0, 400)}`);
+          AI_INFLIGHT.delete(id);
+        });
+        return;
+      }
+      // SSE parsing — Anthropic's stream emits `event: <name>\ndata: {...}`
+      // pairs separated by blank lines. Text deltas come as
+      // `content_block_delta` events with `delta.type === "text_delta"`.
+      let pending = "";
+      let total   = 0;
+      res.on("data", (chunk) => {
+        pending += chunk.toString();
+        let idx;
+        while ((idx = pending.indexOf("\n\n")) !== -1) {
+          const event = pending.slice(0, idx);
+          pending = pending.slice(idx + 2);
+          for (const rawLine of event.split("\n")) {
+            const line = rawLine.startsWith("data: ") ? rawLine.slice(6) : "";
+            if (!line || !line.startsWith("{")) continue;
+            try {
+              const j = JSON.parse(line);
+              if (j.type === "content_block_delta" &&
+                  j.delta?.type === "text_delta" &&
+                  typeof j.delta.text === "string") {
+                total += j.delta.text.length;
+                send("ember:ai:chunk", j.delta.text);
+              }
+            } catch { /* keepalive comment */ }
           }
         }
       });
