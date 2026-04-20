@@ -37,3 +37,4 @@ nohup.out
 *.log
 CLAUDE.md
 ROADMAP.md
+.claude/
