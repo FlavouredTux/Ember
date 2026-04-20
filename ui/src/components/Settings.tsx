@@ -3,7 +3,7 @@ import { C, sans, serif, mono } from "../theme";
 import type { AppSettings } from "../settings";
 import { DEFAULT_SETTINGS } from "../settings";
 import { clearRendererCaches } from "../api";
-import type { AiConfig, AiCliStatus, AiProvider, AiOAuthProbe } from "../types";
+import type { AiConfig, AiCliStatus, AiProvider } from "../types";
 
 // Settings gear. Stroked-outline style (matches the rest of the
 // title-bar glyphs), 24×24 viewBox so the curved tooth flanks
@@ -310,12 +310,9 @@ function AiConfigSection() {
   const [models, setMs]    = useState<string[]>([]);
   const [claude, setClaude] = useState<AiCliStatus | null>(null);
   const [codex,  setCodex]  = useState<AiCliStatus | null>(null);
-  const [oauth,  setOauth]  = useState<AiOAuthProbe | null>(null);
-
   const reloadProbes = () => {
     window.ember.ai.detectCli("claude-cli").then(setClaude).catch(() => {});
     window.ember.ai.detectCli("codex-cli").then(setCodex).catch(() => {});
-    window.ember.ai.probeClaudeOAuth().then(setOauth).catch(() => {});
   };
 
   useEffect(() => {
@@ -362,7 +359,7 @@ function AiConfigSection() {
       >
         <Segmented
           value={cfg.provider}
-          options={["openrouter", "claude-pro", "claude-cli", "codex-cli"] as const}
+          options={["openrouter", "claude-cli", "codex-cli"] as const}
           onChange={changeProvider}
         />
       </Row>
@@ -371,21 +368,14 @@ function AiConfigSection() {
         <OpenRouterKeySection cfg={cfg} onSave={saveKey} />
       )}
 
-      {cfg.provider === "claude-pro" && (
-        <ClaudeOAuthSection probe={oauth} onRefresh={reloadProbes} />
-      )}
-
       {cfg.provider === "claude-cli" && (
-        <>
-          <CliStatusSection
-            kind="claude-cli"
-            status={claude}
-            onRefresh={reloadProbes}
-            loginCmd="claude auth login"
-            note="Ember spawns the installed `claude` binary per request. Works for Anthropic Console API billing (any account with `sk-ant-api03-…` keys configured). For Pro / Max subscription billing, use the `claude-pro` provider instead — `claude -p` doesn't accept subscription OAuth tokens by design."
-          />
-          <ClaudeTokenSection cfg={cfg} onSaved={(c) => setCfg(c)} />
-        </>
+        <CliStatusSection
+          kind="claude-cli"
+          status={claude}
+          onRefresh={reloadProbes}
+          loginCmd="claude auth login"
+          note="Uses the official @anthropic-ai/claude-agent-sdk to invoke your installed Claude Code session. Works for both Pro / Max subscription auth (the SDK handles the OAuth that `claude -p` alone refuses) and Anthropic Console API billing — whichever `claude auth login` was run with."
+        />
       )}
 
       {cfg.provider === "codex-cli" && (
@@ -467,134 +457,6 @@ function OpenRouterKeySection(props: {
           >forget key</button>
         </Row>
       )}
-    </>
-  );
-}
-
-// claude-pro provider section. Reads OAuth credentials directly from
-// ~/.claude/.credentials.json (where Claude Code writes them after
-// `claude auth login`) and calls the Anthropic Messages API on the
-// user's subscription. The community fix for the headless gap that
-// Anthropic left when they made `claude -p` API-key-only.
-//
-// ToS warning: Anthropic banned third-party tools from using
-// subscription OAuth in April 2026. We surface the warning so the
-// user knows; they choose whether to use it.
-function ClaudeOAuthSection(props: {
-  probe: AiOAuthProbe | null;
-  onRefresh: () => void;
-}) {
-  const p = props.probe;
-  const dot =
-    !p             ? C.textFaint :
-    !p.found       ? C.red       :
-    p.expired      ? C.red       :
-                     C.green;
-  const label =
-    !p             ? "probing…" :
-    !p.found       ? "no credentials at ~/.claude/.credentials.json" :
-    p.expired      ? "credentials expired — re-run `claude auth login`" :
-                     `signed in${p.expiresAt ? ` · expires ${new Date(p.expiresAt).toLocaleString()}` : ""}`;
-  return (
-    <>
-      <Row
-        label="OAuth status"
-        hint="Reads the access token Claude Code wrote during `claude auth login`. Calls Anthropic's Messages API directly with the OAuth flag — bypasses the `claude -p` API-key requirement so Pro / Max billing actually works."
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{
-            width: 7, height: 7, borderRadius: 4,
-            background: dot, flexShrink: 0,
-          }} />
-          <span style={{ fontFamily: mono, fontSize: 11, color: C.text }}>
-            {label}
-          </span>
-          <button onClick={props.onRefresh} style={iconBtnStyle}>recheck</button>
-        </div>
-      </Row>
-      {p && !p.found && (
-        <Row label="To sign in" hint="Run in a terminal, then click recheck above.">
-          <code style={{
-            fontFamily: mono, fontSize: 11,
-            color: C.accent, background: C.bg,
-            border: `1px solid ${C.border}`,
-            borderRadius: 4, padding: "5px 10px",
-            whiteSpace: "nowrap",
-          }}>claude auth login</code>
-        </Row>
-      )}
-      <Row
-        label="ToS notice"
-        hint="Read this before relying on this provider for production work."
-      >
-        <span style={{
-          fontFamily: serif, fontStyle: "italic",
-          fontSize: 11, color: C.red,
-          maxWidth: 320, lineHeight: 1.4,
-        }}>
-          Anthropic banned third-party tools from using subscription
-          OAuth in April 2026. Account flagging is a real risk.
-        </span>
-      </Row>
-    </>
-  );
-}
-
-// Claude Code long-lived OAuth token, for Pro / Max users whose `-p`
-// headless calls can't use the interactive auth session. The token
-// comes from `claude setup-token`; the CLI prints it to stdout and
-// tells the user to set CLAUDE_CODE_OAUTH_TOKEN. Ember stores it in
-// safeStorage and injects it into every claude spawn's env.
-function ClaudeTokenSection(props: {
-  cfg: AiConfig;
-  onSaved: (c: AiConfig) => void;
-}) {
-  const [draft, setDraft]   = useState("");
-  const [revealed, setRev]  = useState(false);
-  const [saving, setSaving] = useState(false);
-  return (
-    <>
-      <Row
-        label="Claude OAuth token"
-        hint={props.cfg.hasClaudeToken
-          ? "Stored (encrypted where the OS keychain is available). Paste a new token to replace; leave blank and hit save to forget."
-          : "Run `claude setup-token` in a terminal, copy the sk-ant-oat01-… string it prints, paste here."}
-      >
-        <div style={{ display: "flex", gap: 4 }}>
-          <input
-            type={revealed ? "text" : "password"}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={props.cfg.hasClaudeToken ? "•••••• (token set)" : "sk-ant-oat01-…"}
-            style={{
-              width: 220,
-              fontFamily: mono, fontSize: 11,
-              color: C.text, background: C.bg,
-              border: `1px solid ${C.border}`, borderRadius: 4,
-              padding: "5px 8px",
-            }}
-          />
-          <button onClick={() => setRev((r) => !r)} style={iconBtnStyle}>
-            {revealed ? "hide" : "show"}
-          </button>
-          <button
-            onClick={async () => {
-              setSaving(true);
-              try {
-                const next = await window.ember.ai.setConfig({ claudeToken: draft });
-                props.onSaved(next);
-                setDraft("");
-              } finally { setSaving(false); }
-            }}
-            disabled={saving}
-            style={{
-              ...iconBtnStyle,
-              background: draft ? C.accent : C.bgMuted,
-              color:      draft ? "#fff"   : C.textMuted,
-            }}
-          >save</button>
-        </div>
-      </Row>
     </>
   );
 }

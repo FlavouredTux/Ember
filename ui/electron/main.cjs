@@ -3,6 +3,20 @@ const { spawn } = require("node:child_process");
 const https = require("node:https");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+// Official Anthropic SDK that wraps the user's installed `claude` binary
+// and handles subscription auth (Pro/Max OAuth) correctly. Loaded
+// lazily so the renderer doesn't pay the import cost on startup.
+let _claudeQuery = null;
+function loadClaudeSdk() {
+  if (_claudeQuery) return _claudeQuery;
+  try {
+    _claudeQuery = require("@anthropic-ai/claude-agent-sdk").query;
+  } catch (e) {
+    _claudeQuery = null;
+    throw new Error(`@anthropic-ai/claude-agent-sdk not installed: ${e.message}`);
+  }
+  return _claudeQuery;
+}
 
 const EMBER_BIN = process.env.EMBER_BIN ||
   path.join(__dirname, "..", "..", "build", "cli", "ember");
@@ -223,15 +237,8 @@ ipcMain.handle("ember:saveAnnotations", async (_e, bp, data) => {
 
 const AI_CONFIG_PATH = () => path.join(app.getPath("userData"), "ai.json");
 
-const AI_PROVIDERS = ["openrouter", "claude-pro", "claude-cli", "codex-cli"];
+const AI_PROVIDERS = ["openrouter", "claude-cli", "codex-cli"];
 const AI_DEFAULT_PROVIDER = "openrouter";
-
-// Path to Claude Code's on-disk OAuth credentials. Linux & Windows
-// store the JSON here; macOS keeps the same shape in the Keychain
-// under service `com.anthropic.claude` (we read the file path first
-// and fall back to env-var-supplied tokens for the keychain case).
-const CLAUDE_CREDENTIALS_PATH = () =>
-  path.join(require("node:os").homedir(), ".claude", ".credentials.json");
 
 // Per-provider model lists surfaced as autocomplete suggestions. The
 // combobox in the UI lets users type any model id regardless — these
@@ -250,21 +257,13 @@ const AI_MODEL_SUGGESTIONS = {
     "x-ai/grok-4",
     "meta-llama/llama-4-maverick",
   ],
-  // OAuth-mode model ids must use the API's full-name format —
-  // sonnet/opus/haiku aliases are CLI-only conveniences.
-  "claude-pro": [
-    "claude-sonnet-4-6-20251015",
-    "claude-opus-4-7-20260301",
-    "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6",
-    "claude-opus-4-7",
-  ],
   "claude-cli": [
     "sonnet",
     "opus",
     "haiku",
     "claude-sonnet-4-6",
     "claude-opus-4-7",
+    "claude-haiku-4-5",
   ],
   "codex-cli": [
     "gpt-5",
@@ -315,7 +314,6 @@ async function loadAiConfig() {
     model,
     hasKey,
     encrypted: !!j.keyEncrypted,
-    hasClaudeToken: !!(j.claudeTokenEnc || j.claudeTokenPlain),
   };
 }
 
@@ -330,48 +328,7 @@ async function loadAiKey() {
   } catch { return ""; }
 }
 
-// Separate storage for the Claude Code long-lived OAuth token
-// (`claude setup-token` output). Pro/Max subscriptions can't use
-// their interactive `claude auth login` session with the `-p`
-// headless mode Ember relies on — the CLI refuses with
-// "Not logged in · Please run /login". The setup-token flow is
-// Anthropic's explicit answer: paste the token here, Ember passes
-// it to every `claude -p` spawn via CLAUDE_CODE_OAUTH_TOKEN.
-async function loadClaudeToken() {
-  try {
-    const raw = await fs.readFile(AI_CONFIG_PATH(), "utf8");
-    const j   = JSON.parse(raw);
-    if (j.claudeTokenEnc && safeStorage.isEncryptionAvailable()) {
-      return safeStorage.decryptString(Buffer.from(j.claudeTokenEnc, "base64"));
-    }
-    return j.claudeTokenPlain || "";
-  } catch { return ""; }
-}
-async function hasClaudeToken() {
-  return !!(await loadClaudeToken());
-}
 
-// Read Claude Code's on-disk OAuth credentials. Used by the
-// `claude-pro` provider, which talks to the Anthropic Messages API
-// directly with the subscription's OAuth token because `claude -p`
-// doesn't accept OAuth — it requires ANTHROPIC_API_KEY billing.
-// Returns { accessToken, refreshToken, expiresAt } or null if the
-// file isn't there or has an unexpected shape.
-async function loadClaudeOAuth() {
-  let raw;
-  try { raw = await fs.readFile(CLAUDE_CREDENTIALS_PATH(), "utf8"); }
-  catch { return null; }
-  let j; try { j = JSON.parse(raw); } catch { return null; }
-  // Schema verified against `claude auth login` output:
-  //   { "claudeAiOauth": { accessToken, refreshToken, expiresAt, ... } }
-  // Older revisions used flat keys; accept both shapes.
-  const oauth = j.claudeAiOauth || j;
-  const accessToken  = oauth.accessToken  || oauth.access_token;
-  const refreshToken = oauth.refreshToken || oauth.refresh_token;
-  const expiresAt    = oauth.expiresAt    || oauth.expires_at;
-  if (!accessToken) return null;
-  return { accessToken, refreshToken, expiresAt };
-}
 
 async function saveAiConfig(patch) {
   // Read-modify-write so partial updates (just the provider, just the
@@ -394,18 +351,6 @@ async function saveAiConfig(patch) {
         cur.keyEncrypted = safeStorage.encryptString(patch.apiKey).toString("base64");
       } else {
         cur.keyPlain = patch.apiKey;
-      }
-    }
-  }
-  if (typeof patch.claudeToken === "string") {
-    delete cur.claudeTokenEnc;
-    delete cur.claudeTokenPlain;
-    if (patch.claudeToken) {
-      if (safeStorage.isEncryptionAvailable()) {
-        cur.claudeTokenEnc =
-          safeStorage.encryptString(patch.claudeToken).toString("base64");
-      } else {
-        cur.claudeTokenPlain = patch.claudeToken;
       }
     }
   }
@@ -459,20 +404,6 @@ ipcMain.handle("ember:ai:listModels", async (_e, provider) => {
 });
 
 ipcMain.handle("ember:ai:detectCli", async (_e, kind) => detectCli(kind));
-
-// Probe Claude OAuth credentials on disk for the claude-pro provider.
-// The Settings panel uses this to render a green/red status pill
-// without exposing the actual token bytes.
-ipcMain.handle("ember:ai:probeClaudeOAuth", async () => {
-  const cred = await loadClaudeOAuth();
-  if (!cred) return { found: false, expired: false };
-  const expired = !!(cred.expiresAt && cred.expiresAt < Date.now());
-  return {
-    found:    true,
-    expired,
-    expiresAt: cred.expiresAt || 0,
-  };
-});
 
 // Active in-flight requests, keyed by id so `ai:cancel` can abort.
 // Each entry records a {cancel} hook — HTTP requests use req.destroy,
@@ -745,140 +676,93 @@ ipcMain.handle("ember:ai:chat", async (e, { messages, model, temperature }) => {
     return id;
   }
 
-  // ---- Claude Pro/Max (OAuth direct to Anthropic API) ---------------
-  // Subscription users can't use `claude -p` for headless calls
-  // (it forces ANTHROPIC_API_KEY billing). The community fix is to
-  // read the OAuth token Claude Code stored after `claude auth login`
-  // and call the Messages API ourselves with the oauth-2025-04-20
-  // beta header. ToS note: Anthropic banned third-party tools from
-  // doing this in April 2026 — surfaces in the Settings panel as a
-  // warning, but we let the user opt in if they accept the risk.
-  if (cfg.provider === "claude-pro") {
-    const cred = await loadClaudeOAuth();
-    if (!cred) {
-      throw new Error("no Claude OAuth credentials at ~/.claude/.credentials.json — run `claude auth login` first");
-    }
-    if (cred.expiresAt && cred.expiresAt < Date.now()) {
-      throw new Error("Claude OAuth access token has expired — run `claude auth login` again to refresh");
-    }
+  // ---- Claude (via official Agent SDK) ------------------------------
+  // We call `@anthropic-ai/claude-agent-sdk`'s `query()` rather than
+  // shelling out to `claude -p` ourselves. The SDK is Anthropic's
+  // own programmatic surface for Claude Code — it spawns the user's
+  // installed `claude` binary internally, handles the IPC, AND
+  // crucially it accepts subscription OAuth (Pro / Max) where the
+  // raw `-p` flag forces ANTHROPIC_API_KEY billing. Same path t3code
+  // uses; nothing token-scraping or ToS-grey here.
+  if (cfg.provider === "claude-cli") {
+    let queryFn;
+    try { queryFn = loadClaudeSdk(); }
+    catch (e) { throw new Error(e.message); }
 
-    // The system prompt becomes the API's `system` field; the rest
-    // of the conversation history goes in `messages` as-is. Claude's
-    // Messages API expects role: "user" | "assistant" only.
     const systemPrompt = extractSystemPrompt(messages);
-    const apiMessages  = messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content }));
+    // The SDK's `prompt` field takes one user turn for one-shot
+    // calls. Multi-turn history is flattened into a single string
+    // with role prefixes — same approach as the previous CLI path
+    // and good enough for the chat panel's typical 2-3 turn arc.
+    const flat = flattenMessages(messages);
 
-    const body = JSON.stringify({
-      model:       chosenModel,
-      max_tokens:  4096,
-      stream:      true,
-      system:      systemPrompt || undefined,
-      messages:    apiMessages,
-      temperature: typeof temperature === "number" ? temperature : 0.4,
-    });
+    const abort = new AbortController();
+    AI_INFLIGHT.set(id, { cancel: () => abort.abort() });
 
-    const req = https.request({
-      method:   "POST",
-      hostname: "api.anthropic.com",
-      path:     "/v1/messages",
-      headers:  {
-        "Authorization":     `Bearer ${cred.accessToken}`,
-        "Content-Type":      "application/json",
-        "Content-Length":    Buffer.byteLength(body),
-        "anthropic-version": "2023-06-01",
-        // The OAuth flag tells Anthropic this request is using a
-        // subscription token rather than an API key. Without it
-        // the server returns 401 "API key required".
-        "anthropic-beta":    "oauth-2025-04-20",
-        // Mimic the real CLI's UA so traffic looks identical to
-        // what `claude` itself would send. The exact version doesn't
-        // matter — the format does.
-        "User-Agent":        "claude-cli/2.1.114 (external, cli)",
-      },
-    }, (res) => {
-      if (res.statusCode && res.statusCode >= 400) {
-        let buf = "";
-        res.on("data", (d) => { buf += d.toString(); });
-        res.on("end", () => {
-          send("ember:ai:error",
-               `Anthropic ${res.statusCode}: ${buf.slice(0, 400)}`);
-          AI_INFLIGHT.delete(id);
+    let total = 0;
+    (async () => {
+      try {
+        const q = queryFn({
+          prompt: flat,
+          options: {
+            ...(chosenModel ? { model: chosenModel } : {}),
+            // Append vs replace: keeps Claude Code's built-in tool /
+            // safety preamble intact while injecting Ember's RE
+            // analyst directives. Replace would strip the file-read
+            // / edit / safety guardrails the SDK ships with.
+            ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),
+            // Empty tool list = pure chat. We're not running an
+            // agent loop with file edits / bash — Ember already
+            // owns the binary analysis surface.
+            tools: [],
+            // Bare-mode equivalent: don't load user/project CLAUDE.md,
+            // hooks, MCP servers. Keeps responses focused on the
+            // Ember context we attached, no environmental drift.
+            settingSources: [],
+            includePartialMessages: true,
+            persistSession: false,
+            permissionMode: "bypassPermissions",
+            allowDangerouslySkipPermissions: true,
+            abortController: abort,
+            // Identify Ember in the SDK's User-Agent so Anthropic's
+            // dashboards distinguish our traffic from raw `claude` use.
+            env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "ember/0.1" },
+          },
         });
-        return;
-      }
-      // SSE parsing — Anthropic's stream emits `event: <name>\ndata: {...}`
-      // pairs separated by blank lines. Text deltas come as
-      // `content_block_delta` events with `delta.type === "text_delta"`.
-      let pending = "";
-      let total   = 0;
-      res.on("data", (chunk) => {
-        pending += chunk.toString();
-        let idx;
-        while ((idx = pending.indexOf("\n\n")) !== -1) {
-          const event = pending.slice(0, idx);
-          pending = pending.slice(idx + 2);
-          for (const rawLine of event.split("\n")) {
-            const line = rawLine.startsWith("data: ") ? rawLine.slice(6) : "";
-            if (!line || !line.startsWith("{")) continue;
-            try {
-              const j = JSON.parse(line);
-              if (j.type === "content_block_delta" &&
-                  j.delta?.type === "text_delta" &&
-                  typeof j.delta.text === "string") {
-                total += j.delta.text.length;
-                send("ember:ai:chunk", j.delta.text);
-              }
-            } catch { /* keepalive comment */ }
+
+        for await (const msg of q) {
+          // Streaming text arrives as stream_event messages whose
+          // inner `event` matches Anthropic's standard
+          // BetaRawMessageStreamEvent shape. We only forward text
+          // deltas — tool_use / start / stop / ping events are
+          // bookkeeping the chat panel doesn't render.
+          if (msg.type === "stream_event" &&
+              msg.event?.type === "content_block_delta" &&
+              msg.event.delta?.type === "text_delta" &&
+              typeof msg.event.delta.text === "string") {
+            total += msg.event.delta.text.length;
+            send("ember:ai:chunk", msg.event.delta.text);
           }
         }
-      });
-      res.on("end", () => {
         send("ember:ai:done", { chars: total });
+      } catch (err) {
+        const m = err?.message || String(err);
+        // Translate the SDK's common failure modes into actionable
+        // guidance — these are the same diagnostics the user would
+        // see at the CLI but rendered in-panel where they'll be read.
+        let friendly = m;
+        if (/ENOENT|claude.*not found/i.test(m)) {
+          friendly = "claude binary not found on PATH. Install Claude Code (npm i -g @anthropic-ai/claude-code) and run `claude auth login`.";
+        } else if (/not.*logged in|please run \/login|unauthorized|authentication/i.test(m)) {
+          friendly = "Claude Code session not authenticated. Run `claude auth login` in a terminal, then retry.";
+        } else if (/rate.?limit|429/i.test(m)) {
+          friendly = "Rate-limited by Anthropic. Wait a bit and retry, or switch provider.";
+        }
+        send("ember:ai:error", friendly);
+      } finally {
         AI_INFLIGHT.delete(id);
-      });
-    });
-    req.on("error", (err) => {
-      send("ember:ai:error", err.message || String(err));
-      AI_INFLIGHT.delete(id);
-    });
-    AI_INFLIGHT.set(id, { cancel: () => req.destroy(new Error("cancelled")) });
-    req.write(body);
-    req.end();
-    return id;
-  }
-
-  // ---- Claude Code CLI ----------------------------------------------
-  if (cfg.provider === "claude-cli") {
-    const systemPrompt = extractSystemPrompt(messages);
-    const flat         = flattenMessages(messages);
-    const args = [
-      "-p",                       // print/headless
-      "--bare",                   // skip auto-discovery (faster, no hooks/skills)
-      "--no-session-persistence", // don't pollute the user's session history
-      "--output-format", "stream-json",
-      "--include-partial-messages",
-      "--verbose",                // stream-json requires verbose on recent versions
-    ];
-    if (chosenModel) args.push("--model", chosenModel);
-    if (systemPrompt) args.push("--append-system-prompt", systemPrompt);
-    args.push(flat);
-
-    // Pro/Max users: interactive `claude auth login` doesn't carry
-    // over to `-p` mode — Anthropic steers scripted callers to the
-    // long-lived token from `claude setup-token`, consumed via
-    // CLAUDE_CODE_OAUTH_TOKEN. If the user stored one via Settings,
-    // pass it through; otherwise fall through to whatever session
-    // Claude Code finds on its own (works for Anthropic Console API
-    // keys, and for Pro/Max when setup-token env is already set in
-    // the shell Ember was launched from).
-    const claudeToken = await loadClaudeToken();
-    const env = claudeToken ? { CLAUDE_CODE_OAUTH_TOKEN: claudeToken } : undefined;
-
-    const proc = spawnCliStream(id, send, "claude", args, null,
-                                parseClaudeStreamEvent, env);
-    if (proc) AI_INFLIGHT.set(id, { cancel: () => proc.kill("SIGTERM") });
+      }
+    })();
     return id;
   }
 
