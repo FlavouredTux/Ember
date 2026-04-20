@@ -299,6 +299,7 @@ async function loadAiConfig() {
     model,
     hasKey,
     encrypted: !!j.keyEncrypted,
+    hasClaudeToken: !!(j.claudeTokenEnc || j.claudeTokenPlain),
   };
 }
 
@@ -311,6 +312,27 @@ async function loadAiKey() {
     }
     return j.keyPlain || "";
   } catch { return ""; }
+}
+
+// Separate storage for the Claude Code long-lived OAuth token
+// (`claude setup-token` output). Pro/Max subscriptions can't use
+// their interactive `claude auth login` session with the `-p`
+// headless mode Ember relies on — the CLI refuses with
+// "Not logged in · Please run /login". The setup-token flow is
+// Anthropic's explicit answer: paste the token here, Ember passes
+// it to every `claude -p` spawn via CLAUDE_CODE_OAUTH_TOKEN.
+async function loadClaudeToken() {
+  try {
+    const raw = await fs.readFile(AI_CONFIG_PATH(), "utf8");
+    const j   = JSON.parse(raw);
+    if (j.claudeTokenEnc && safeStorage.isEncryptionAvailable()) {
+      return safeStorage.decryptString(Buffer.from(j.claudeTokenEnc, "base64"));
+    }
+    return j.claudeTokenPlain || "";
+  } catch { return ""; }
+}
+async function hasClaudeToken() {
+  return !!(await loadClaudeToken());
 }
 
 async function saveAiConfig(patch) {
@@ -334,6 +356,18 @@ async function saveAiConfig(patch) {
         cur.keyEncrypted = safeStorage.encryptString(patch.apiKey).toString("base64");
       } else {
         cur.keyPlain = patch.apiKey;
+      }
+    }
+  }
+  if (typeof patch.claudeToken === "string") {
+    delete cur.claudeTokenEnc;
+    delete cur.claudeTokenPlain;
+    if (patch.claudeToken) {
+      if (safeStorage.isEncryptionAvailable()) {
+        cur.claudeTokenEnc =
+          safeStorage.encryptString(patch.claudeToken).toString("base64");
+      } else {
+        cur.claudeTokenPlain = patch.claudeToken;
       }
     }
   }
@@ -427,10 +461,16 @@ function extractSystemPrompt(messages) {
 // line-oriented transformer — CLI tools that emit JSONL streaming
 // events use it to pull out just the text delta; text-mode tools
 // pass chunks through unchanged.
-function spawnCliStream(id, send, cmd, args, stdinData, parseChunk) {
+function spawnCliStream(id, send, cmd, args, stdinData, parseChunk, env) {
   let proc;
   try {
-    proc = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+    proc = spawn(cmd, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      // Merge caller env on top of process.env so a missing entry
+      // falls through to whatever the user's shell had when Ember
+      // was launched. Undefined env leaves spawn's default (inherit).
+      env: env ? { ...process.env, ...env } : undefined,
+    });
   } catch (e) {
     send("ember:ai:error", `${cmd}: ${e.message || String(e)}`);
     return null;
@@ -489,7 +529,7 @@ function spawnCliStream(id, send, cmd, args, stdinData, parseChunk) {
     let msg;
     if (/not logged in|please run \/login|unauthorized|not authenticated/.test(diag)) {
       msg = cmd === "claude"
-        ? `${cmd} is not signed in for headless use. Run \`claude setup-token\` (long-lived token for scripted calls) or \`claude auth login\` in a terminal, then retry.`
+        ? `claude -p (headless mode) can't use the \`claude auth login\` session on its own. Run \`claude setup-token\` in a terminal and paste the token into Settings → AI → "Claude OAuth token". Ember passes it to claude via CLAUDE_CODE_OAUTH_TOKEN on every spawn.`
         : `${cmd} is not signed in. Run \`codex login\` in a terminal, then retry.`;
     } else if (/rate[- ]?limit|429|exceeded your/i.test(diag)) {
       msg = `${cmd}: rate-limited by the provider. Wait a bit and retry, or switch provider.`;
@@ -669,8 +709,19 @@ ipcMain.handle("ember:ai:chat", async (e, { messages, model, temperature }) => {
     if (systemPrompt) args.push("--append-system-prompt", systemPrompt);
     args.push(flat);
 
+    // Pro/Max users: interactive `claude auth login` doesn't carry
+    // over to `-p` mode — Anthropic steers scripted callers to the
+    // long-lived token from `claude setup-token`, consumed via
+    // CLAUDE_CODE_OAUTH_TOKEN. If the user stored one via Settings,
+    // pass it through; otherwise fall through to whatever session
+    // Claude Code finds on its own (works for Anthropic Console API
+    // keys, and for Pro/Max when setup-token env is already set in
+    // the shell Ember was launched from).
+    const claudeToken = await loadClaudeToken();
+    const env = claudeToken ? { CLAUDE_CODE_OAUTH_TOKEN: claudeToken } : undefined;
+
     const proc = spawnCliStream(id, send, "claude", args, null,
-                                parseClaudeStreamEvent);
+                                parseClaudeStreamEvent, env);
     if (proc) AI_INFLIGHT.set(id, { cancel: () => proc.kill("SIGTERM") });
     return id;
   }
