@@ -51,10 +51,11 @@ jobs:
 
       - name: Build core + unit-test executables
         run: |
-          cmake --build build --target ember_core \
-                                 ember_demangle_test \
-                                 ember_annotations_resolver_test \
-                                 ember_sigs_test
+          cmake --build build --verbose \
+                                  --target ember_core \
+                                          ember_demangle_test \
+                                          ember_annotations_resolver_test \
+                                          ember_sigs_test
 
       - name: Run toolchain-independent unit tests
         run: |
