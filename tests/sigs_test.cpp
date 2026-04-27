@@ -36,6 +36,23 @@ void check_eq(const A& got, const B& want, const char* ctx) {
     }
 }
 
+void check_eq_sz(std::size_t got, std::size_t want, const char* ctx) {
+    if (got != want) {
+        std::fprintf(stderr, "FAIL: %s (got %zu, want %zu)\n",
+                     ctx, got, want);
+        ++fails;
+    }
+}
+
+void check_eq_str(const std::string& got, std::string_view want, const char* ctx) {
+    if (got != want) {
+        std::fprintf(stderr, "FAIL: %s (got '%s', want '%.*s')\n",
+                     ctx, got.c_str(),
+                     static_cast<int>(want.size()), want.data());
+        ++fails;
+    }
+}
+
 void check(bool cond, const char* ctx) {
     if (!cond) {
         std::fprintf(stderr, "FAIL: %s\n", ctx);
@@ -56,14 +73,14 @@ struct ImageBytes {
     ImageBytes() {
         // Default-fill with NOP (0x90) so any decoder linear-walking past
         // the 6-byte function still sees valid instructions.
-        for (auto& b : data) b = std::byte{0x90};
+        for (auto& b : data) b = static_cast<std::byte>(0x90u);
         // Function bytes.
-        const std::array<std::uint8_t, 6> fn = {
-            0xe8, 0x1b, 0x00, 0x00, 0x00,  // call 0x401020
-            0xc3,                          // ret
+        const std::array<unsigned, 6> fn = {
+            0xe8u, 0x1bu, 0x00u, 0x00u, 0x00u,  // call 0x401020
+            0xc3u,                              // ret
         };
         for (std::size_t i = 0; i < fn.size(); ++i) {
-            data[i] = std::byte{fn[i]};
+            data[i] = static_cast<std::byte>(fn[i]);
         }
     }
 };
@@ -176,25 +193,23 @@ int main() {
     auto db_all = sigs::load_pat(pat_all);
     check(db_all.has_value(), "load_pat: file loaded");
     if (db_all) {
-        check_eq(db_all->sigs.size(), std::size_t(3), "3 sigs parsed");
+        check_eq_sz(db_all->sigs.size(), 3, "3 sigs parsed");
         if (db_all->sigs.size() == 3) {
-            check_eq(db_all->sigs[0].name, std::string("winmain_proc"),
-                     "sig 0 name");
+            check_eq_str(db_all->sigs[0].name, "winmain_proc",
+                         "sig 0 name");
             check_eq(db_all->sigs[0].prefix_len, static_cast<u16>(6),
                      "sig 0 prefix_len");
             check_eq(db_all->sigs[0].crc_length, static_cast<u8>(0),
                      "sig 0 crc_length");
-            check_eq(db_all->sigs[0].refs.size(), std::size_t(0),
-                     "sig 0 refs");
+            check_eq_sz(db_all->sigs[0].refs.size(), 0, "sig 0 refs");
             check_eq(db_all->sigs[1].crc_length, static_cast<u8>(1),
                      "sig 1 crc_length");
             check_eq(db_all->sigs[1].crc16, static_cast<u16>(0xDEAD),
                      "sig 1 crc16");
-            check_eq(db_all->sigs[2].refs.size(), std::size_t(1),
-                     "sig 2 has one ref");
+            check_eq_sz(db_all->sigs[2].refs.size(), 1, "sig 2 has one ref");
             if (!db_all->sigs[2].refs.empty()) {
-                check_eq(db_all->sigs[2].refs[0].name, std::string("fopen"),
-                         "sig 2 ref name");
+                check_eq_str(db_all->sigs[2].refs[0].name, "fopen",
+                             "sig 2 ref name");
             }
         }
     }
@@ -207,8 +222,7 @@ int main() {
     auto db_mal = sigs::load_pat(pat_malformed);
     check(db_mal.has_value(), "load_pat: malformed lines don't fail load");
     if (db_mal) {
-        check_eq(db_mal->sigs.size(), std::size_t(1),
-                 "load_pat: only valid sigs kept");
+        check_eq_sz(db_mal->sigs.size(), 1, "load_pat: only valid sigs kept");
     }
 
     // Missing file: surfaces as Error::not_found.
@@ -231,10 +245,10 @@ int main() {
     {
         auto db = only("e81b000000c3 00 0000 0006 :0000 winmain_proc\n");
         const auto rs = sigs::apply_signatures(mb, db, cands);
-        check_eq(rs.size(), std::size_t(1), "match: one rename");
+        check_eq_sz(rs.size(), 1, "match: one rename");
         if (rs.size() == 1) {
             check_eq(rs[0].addr, kFnAddr, "match: addr");
-            check_eq(rs[0].name, std::string("winmain_proc"), "match: name");
+            check_eq_str(rs[0].name, "winmain_proc", "match: name");
         }
     }
 
@@ -243,7 +257,7 @@ int main() {
     {
         auto db = only("e81b00000000 01 DEAD 0006 :0000 bad_crc\n");
         const auto rs = sigs::apply_signatures(mb, db, cands);
-        check_eq(rs.size(), std::size_t(0), "crc mismatch: no rename");
+        check_eq_sz(rs.size(), 0, "crc mismatch: no rename");
     }
 
     // Path 3: prefix matches and CRC is skipped, but the @ref names an
@@ -252,7 +266,7 @@ int main() {
         auto db = only(
             "e81b000000c3 00 0000 0006 :0000 missing_ref @0000 fopen\n");
         const auto rs = sigs::apply_signatures(mb, db, cands);
-        check_eq(rs.size(), std::size_t(0), "ref reject: no rename");
+        check_eq_sz(rs.size(), 0, "ref reject: no rename");
     }
 
     // Path 3': @ref names the import the function actually calls — match.
@@ -260,9 +274,9 @@ int main() {
         auto db = only(
             "e81b000000c3 00 0000 0006 :0000 has_ref @0000 strlen\n");
         const auto rs = sigs::apply_signatures(mb, db, cands);
-        check_eq(rs.size(), std::size_t(1), "ref present: rename");
+        check_eq_sz(rs.size(), 1, "ref present: rename");
         if (rs.size() == 1) {
-            check_eq(rs[0].name, std::string("has_ref"), "ref present: name");
+            check_eq_str(rs[0].name, "has_ref", "ref present: name");
         }
     }
 
@@ -272,8 +286,7 @@ int main() {
         auto db = only("e81b000000c3 00 0000 0006 :0000 winmain_proc\n");
         const std::array<addr_t, 1> existing = {kFnAddr};
         const auto rs = sigs::apply_signatures(mb, db, cands, existing);
-        check_eq(rs.size(), std::size_t(0),
-                 "existing_renames suppresses match");
+        check_eq_sz(rs.size(), 0, "existing_renames suppresses match");
     }
 
     // Symbol-named candidates are skipped — sigs only resolve placeholder
@@ -285,8 +298,7 @@ int main() {
             {kFnAddr, 0, "named_already", DiscoveredFunction::Kind::Symbol},
         };
         const auto rs = sigs::apply_signatures(mb, db, sym_cands);
-        check_eq(rs.size(), std::size_t(0),
-                 "Symbol-kind candidates not renamed");
+        check_eq_sz(rs.size(), 0, "Symbol-kind candidates not renamed");
     }
 
     if (fails == 0) std::puts("ok");
