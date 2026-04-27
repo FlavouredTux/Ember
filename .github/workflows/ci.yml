@@ -59,6 +59,23 @@ jobs:
                                           ember_annotations_resolver_test \
                                           ember_sigs_test 2>&1 | tee build.log
 
+      - name: Surface build errors in job summary
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          {
+            echo "## macOS build error"
+            echo
+            echo '```'
+            grep -E -A2 "error:|warning:.*-Werror|fatal error:" build.log | head -200
+            echo '```'
+            echo
+            echo "## Last 100 lines of build.log"
+            echo
+            echo '```'
+            tail -100 build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload build log on failure
         if: failure() && steps.build.outcome == 'failure'
         uses: actions/upload-artifact@v4
