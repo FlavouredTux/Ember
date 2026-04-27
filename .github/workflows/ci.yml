@@ -29,3 +29,28 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # Build-only check on macOS (Apple Clang). Goldens are pinned to the
+  # gcc:15 toolchain so we can't run ctest here; the value is catching
+  # C++23 idiom drift (e.g. `std::views::enumerate`, which has bitten
+  # us as a post-release Apple Clang hotfix more than once) before it
+  # ships rather than after. Architecture-independent unit tests still
+  # run, since they don't depend on compiled-fixture byte layout.
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: brew install cmake ninja
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run toolchain-independent unit tests
+        run: |
+          ctest --test-dir build --output-on-failure \
+            -R '^(demangle_unit|annotations_resolver_unit|sigs_unit)$'
