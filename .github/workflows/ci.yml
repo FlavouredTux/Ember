@@ -30,12 +30,14 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # Build-only check on macOS (Apple Clang). Goldens are pinned to the
-  # gcc:15 toolchain so we can't run ctest here; the value is catching
-  # C++23 idiom drift (e.g. `std::views::enumerate`, which has bitten
-  # us as a post-release Apple Clang hotfix more than once) before it
-  # ships rather than after. Architecture-independent unit tests still
-  # run, since they don't depend on compiled-fixture byte layout.
+  # Apple Clang build of `ember_core` + the toolchain-independent unit
+  # tests. The point is catching C++23 idiom drift early
+  # (`std::views::enumerate` has bitten the project as a post-release
+  # hotfix more than once). The CLI is intentionally out of scope here:
+  # `cli/` uses `<print>` / `std::println` which need libc++ 18, and
+  # macos-14's Apple Clang 15 ships with libc++ 16. Bringing the CLI
+  # under macOS once libc++ catches up (or once cli/ swaps to fmt) is a
+  # separate workstream.
   build-macos:
     runs-on: macos-14
     steps:
@@ -45,10 +47,14 @@ jobs:
         run: brew install cmake ninja
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DEMBER_BUILD_CLI=OFF
 
-      - name: Build
-        run: cmake --build build
+      - name: Build core + unit-test executables
+        run: |
+          cmake --build build --target ember_core \
+                                 ember_demangle_test \
+                                 ember_annotations_resolver_test \
+                                 ember_sigs_test
 
       - name: Run toolchain-independent unit tests
         run: |
