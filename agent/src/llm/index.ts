@@ -98,6 +98,11 @@ export function keyCount(provider: "anthropic" | "openai" | "openrouter"): numbe
 // Pick the right provider for a given model id. Anthropic models go
 // direct to Anthropic for first-class caching. Everything else through
 // OpenRouter unless the user has OPENAI_API_KEY set and asked for it.
+//
+// Note: `claude-code/*` models route to runClaudeCodeWorker (see
+// worker_claude_code.ts) via a dispatch in cascade.ts / tiebreak.ts /
+// main.ts that bypasses this function entirely. The SDK-driven worker
+// owns its own loop and doesn't go through the LLM.chat() interface.
 export function providerForModel(model: string):
     "anthropic" | "openai" | "openrouter"
 {

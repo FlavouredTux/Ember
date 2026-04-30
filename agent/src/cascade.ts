@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { runWorker } from "./worker.js";
+import { runClaudeCodeWorker } from "./worker_claude_code.js";
 import { promote } from "./promote.js";
 import { IntelLog, intelPathFor, newId } from "./intel/log.js";
 import { EmberDaemon } from "./tools/daemon.js";
@@ -398,7 +399,7 @@ export async function cascade(args: CascadeArgs): Promise<CascadeResult> {
             const runDir = join(args.runsRoot, runId);
             ourDirs.push(runDir);
             mkdirSync(runDir, { recursive: true });
-            return runWorker({
+            const wargs = {
                 role: args.role,
                 binary: args.binary,
                 scope: `fn:${b.addr}`,
@@ -409,7 +410,15 @@ export async function cascade(args: CascadeArgs): Promise<CascadeResult> {
                 runDir,
                 emberBin: args.emberBin,
                 agentId: `cascade-${args.role}-${round}-${runId.slice(2)}`,
-            });
+            };
+            // claude-code/* models route to the SDK-driven worker which
+            // uses the user's Claude Code auth (Max plan quota) instead
+            // of an HTTP API key. Same events.jsonl shape so the rest
+            // of the cascade pipeline (cost tally, promote, telemetry)
+            // is unchanged.
+            return (roundModel ?? "").startsWith("claude-code")
+                ? runClaudeCodeWorker(wargs)
+                : runWorker(wargs);
         });
         const settled = await Promise.allSettled(promises);
         let fulfilled = 0;
