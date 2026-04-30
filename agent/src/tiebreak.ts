@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { runWorker } from "./worker.js";
 import { runClaudeCodeWorker } from "./worker_claude_code.js";
+import { isCodexCliModel, runCodexCliWorker } from "./worker_codex_cli.js";
 import { IntelLog, intelPathFor, newId } from "./intel/log.js";
 
 // Drive the tiebreaker role across the current dispute set. One
@@ -68,6 +69,8 @@ export async function tiebreak(args: TiebreakArgs): Promise<TiebreakResult> {
         };
         return (args.model ?? "").startsWith("claude-code")
             ? runClaudeCodeWorker(wargs)
+            : isCodexCliModel(args.model)
+                ? runCodexCliWorker(wargs)
             : runWorker(wargs);
     });
 
