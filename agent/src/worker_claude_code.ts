@@ -76,15 +76,18 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
         ? requested.slice("claude-code/".length) || undefined
         : undefined;
 
-    // Locate the user's Claude Code home. Default to ~/.claude/, where
-    // the CLI persists OAuth + project state. Override via
-    // EMBER_CLAUDE_HOME so users with multiple installs (e.g. work +
-    // personal) can pick one explicitly.
-    const claudeHome = process.env.EMBER_CLAUDE_HOME ?? join(homedir(), ".claude");
-    if (!existsSync(join(claudeHome, ".credentials.json"))) {
+    // Locate the user's Claude Code home. The SDK appends ".claude/" to
+    // $HOME itself, so HOME must be the *parent* of the .claude directory
+    // (e.g. /home/Gato), not .claude itself. EMBER_CLAUDE_HOME also points
+    // at the parent — set it when you want the SDK to read creds from a
+    // non-default install (work vs personal).
+    const sdkHome = process.env.EMBER_CLAUDE_HOME ?? homedir();
+    const credsPath = join(sdkHome, ".claude", ".credentials.json");
+    if (!existsSync(credsPath)) {
         throw new Error(
-            `claude-code: no credentials at ${claudeHome}/.credentials.json — ` +
-            `run \`claude\` once to authenticate, or set EMBER_CLAUDE_HOME`);
+            `claude-code: no credentials at ${credsPath} — ` +
+            `run \`claude\` once to authenticate, or set EMBER_CLAUDE_HOME ` +
+            `to the directory containing .claude/`);
     }
 
     const intel = new IntelLog(intelPathFor(args.binary));
@@ -163,7 +166,7 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
                 allowedTools: ALL_TOOLS.map((t) => `mcp__ember__${t.def.name}`),
                 env: {
                     ...process.env,
-                    HOME: claudeHome,                       // SDK reads creds from $HOME/.credentials.json
+                    HOME: sdkHome,                          // SDK reads creds from $HOME/.claude/.credentials.json
                     CLAUDE_AGENT_SDK_CLIENT_APP: "ember-agent/1.0.1",
                 },
                 // System prompt: append the role's prompt onto the
