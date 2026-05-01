@@ -78,10 +78,14 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
 
     // Locate the user's Claude Code home. The SDK appends ".claude/" to
     // $HOME itself, so HOME must be the *parent* of the .claude directory
-    // (e.g. /home/Gato), not .claude itself. EMBER_CLAUDE_HOME also points
-    // at the parent — set it when you want the SDK to read creds from a
-    // non-default install (work vs personal).
-    const sdkHome = process.env.EMBER_CLAUDE_HOME ?? homedir();
+    // (e.g. /home/Gato), not .claude itself.
+    //
+    // Resolution order:
+    //   1. WorkerArgs.cliHome — cascade plumbs a per-worker pick from
+    //      pickClaudeHome() for round-robin across a multi-account pool.
+    //   2. EMBER_CLAUDE_HOME — one-shot env override.
+    //   3. ~/ — default for the typical single-account case.
+    const sdkHome = args.cliHome ?? process.env.EMBER_CLAUDE_HOME ?? homedir();
     const credsPath = join(sdkHome, ".claude", ".credentials.json");
     if (!existsSync(credsPath)) {
         throw new Error(

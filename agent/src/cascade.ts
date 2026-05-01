@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { runWorker } from "./worker.js";
 import { runClaudeCodeWorker } from "./worker_claude_code.js";
 import { isCodexCliModel, runCodexCliWorker } from "./worker_codex_cli.js";
+import { pickCodexHome, pickClaudeHome } from "./cli_homes.js";
 import { promote } from "./promote.js";
 import { IntelLog, intelPathFor, newId } from "./intel/log.js";
 import { EmberDaemon } from "./tools/daemon.js";
@@ -414,6 +415,17 @@ export async function cascade(args: CascadeArgs): Promise<CascadeResult> {
             const runDir = join(args.runsRoot, runId);
             ourDirs.push(runDir);
             mkdirSync(runDir, { recursive: true });
+            // Per-worker auth-home pick. When the user has multiple
+            // ChatGPT / Claude Max accounts (typical: 5-account ChatGPT
+            // Business setup), `[codex] homes = [...]` / `[claude_code]
+            // homes = [...]` in agent.toml lets us spread cascade load
+            // across them round-robin. With 30 workers/round × 5 codex
+            // homes that's 6 workers per account per round — staying
+            // well under any per-plan rate limit.
+            const m = roundModel ?? "";
+            const cliHome = m.startsWith("claude-code") ? pickClaudeHome()
+                          : isCodexCliModel(m)          ? pickCodexHome()
+                          :                               undefined;
             const wargs = {
                 role: args.role,
                 binary: args.binary,
@@ -426,16 +438,15 @@ export async function cascade(args: CascadeArgs): Promise<CascadeResult> {
                 emberBin: args.emberBin,
                 agentId: `cascade-${args.role}-${round}-${runId.slice(2)}`,
                 module: args.module,
+                cliHome,
             };
             // claude-code/* and codex-cli/* models route to official
             // local CLI workers, using the user's existing subscription
             // auth instead of HTTP API keys. Same events.jsonl shape so
             // the rest of the cascade pipeline is unchanged.
-            return (roundModel ?? "").startsWith("claude-code")
-                ? runClaudeCodeWorker(wargs)
-                : isCodexCliModel(roundModel)
-                    ? runCodexCliWorker(wargs)
-                : runWorker(wargs);
+            return m.startsWith("claude-code") ? runClaudeCodeWorker(wargs)
+                 : isCodexCliModel(m)          ? runCodexCliWorker(wargs)
+                 :                               runWorker(wargs);
         });
         const settled = await Promise.allSettled(promises);
         let fulfilled = 0;
