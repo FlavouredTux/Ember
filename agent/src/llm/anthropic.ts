@@ -41,7 +41,7 @@ export class AnthropicLLM implements LLM {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema as Anthropic.Tool.InputSchema,
-            // Cache breakpoint on the last tool — Anthropic caches everything
+            // Cache breakpoint on the last tool - Anthropic caches everything
             // up to and including the breakpoint, so this catches system + tools.
             ...(i === req.tools.length - 1
                 ? { cache_control: { type: "ephemeral" as const } }

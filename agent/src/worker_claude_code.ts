@@ -22,7 +22,7 @@ import type { WorkerArgs } from "./worker.js";
 //   model = anything else         → runWorker (HTTP-API LLM adapters)
 //
 // Why this exists: the Anthropic / OpenAI adapters all implement
-// LLM.chat() — single-turn request/response, ember-agent owns the
+// LLM.chat() - single-turn request/response, ember-agent owns the
 // agent loop. The Claude Agent SDK's query() owns its own loop with
 // built-in tool execution, so the architectural shape is different.
 // We let the SDK drive, register ember's tools as in-process MCP
@@ -31,7 +31,7 @@ import type { WorkerArgs } from "./worker.js";
 //
 // Auth: the SDK reads ~/.claude/.credentials.json (the same store
 // `claude` CLI uses). Setting HOME=~/.claude/ on the SDK process picks
-// up whatever auth state Claude Code already established — Max-plan
+// up whatever auth state Claude Code already established - Max-plan
 // users get to spend their plan quota on cascade workers without ever
 // handling an OAuth token. No API key needed; Anthropic's per-use
 // pricing doesn't apply.
@@ -81,15 +81,15 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
     // (e.g. /home/Gato), not .claude itself.
     //
     // Resolution order:
-    //   1. WorkerArgs.cliHome — cascade plumbs a per-worker pick from
+    //   1. WorkerArgs.cliHome - cascade plumbs a per-worker pick from
     //      pickClaudeHome() for round-robin across a multi-account pool.
-    //   2. EMBER_CLAUDE_HOME — one-shot env override.
-    //   3. ~/ — default for the typical single-account case.
+    //   2. EMBER_CLAUDE_HOME - one-shot env override.
+    //   3. ~/ - default for the typical single-account case.
     const sdkHome = args.cliHome ?? process.env.EMBER_CLAUDE_HOME ?? homedir();
     const credsPath = join(sdkHome, ".claude", ".credentials.json");
     if (!existsSync(credsPath)) {
         throw new Error(
-            `claude-code: no credentials at ${credsPath} — ` +
+            `claude-code: no credentials at ${credsPath} - ` +
             `run \`claude\` once to authenticate, or set EMBER_CLAUDE_HOME ` +
             `to the directory containing .claude/`);
     }
@@ -121,7 +121,7 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
     // Wrap every ember tool as an SDK MCP tool. The SDK's loop calls
     // these in-process; our handler dispatches to the existing executor
     // with the bound ToolContext. We don't surface errors as exceptions
-    // to the SDK — the loop expects CallToolResult shape, where a
+    // to the SDK - the loop expects CallToolResult shape, where a
     // user-facing error is content[0].text + isError=true.
     const sdkTools = ALL_TOOLS.map((t) => {
         const shape = jsonSchemaToZodShape(t.def.input_schema);
@@ -158,7 +158,7 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
         const q = query({
             prompt: userPrompt,
             options: {
-                // Disable Claude Code's built-in tools — ember's
+                // Disable Claude Code's built-in tools - ember's
                 // analysis tools are the entire surface this worker
                 // should touch. Bash/Read/Edit on the host filesystem
                 // would be a footgun on a 200-worker cascade.
@@ -229,7 +229,7 @@ export async function runClaudeCodeWorker(args: WorkerArgs): Promise<void> {
                 break;
             }
             // Other SDK message types (system/tool_progress/etc.) are
-            // SDK-internal telemetry. We ignore them — events.jsonl
+            // SDK-internal telemetry. We ignore them - events.jsonl
             // already carries our own tool_ok / tool_err equivalents
             // emitted from the wrapper above.
         }
